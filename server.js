@@ -6,66 +6,81 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
+// Health check route for Render
+app.get('/', (req, res) => {
+  res.send('Server is running');
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*", // In production, restrict this to your domain
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
 
-// A simple room management system for 1-on-1 calls
-const rooms = {};
+// Mapping of unique_code -> socket.id
+const users = {};
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('join-room', (roomId) => {
-    if (!rooms[roomId]) {
-      rooms[roomId] = [];
+  socket.on('register', (uniqueCode) => {
+    users[uniqueCode] = socket.id;
+    socket.uniqueCode = uniqueCode;
+    console.log(`User ${uniqueCode} registered with socket ${socket.id}`);
+  });
+
+  socket.on('call-user', (payload) => {
+    const targetSocket = users[payload.targetCode];
+    if (targetSocket) {
+      io.to(targetSocket).emit('incoming-call', {
+        callerCode: socket.uniqueCode,
+        callerName: payload.callerName
+      });
+    } else {
+      socket.emit('call-failed', 'User is offline or not reachable');
     }
+  });
 
-    if (rooms[roomId].length >= 2) {
-      socket.emit('room-full');
-      return;
+  socket.on('accept-call', (payload) => {
+    const targetSocket = users[payload.targetCode];
+    if (targetSocket) {
+      io.to(targetSocket).emit('call-accepted', { acceptorCode: socket.uniqueCode });
     }
+  });
 
-    rooms[roomId].push(socket.id);
-    socket.join(roomId);
-    console.log(`User ${socket.id} joined room ${roomId}`);
-
-    // If there are exactly two users in the room, they are ready to connect
-    if (rooms[roomId].length === 2) {
-      const otherUser = rooms[roomId].find(id => id !== socket.id);
-      socket.emit('other-user', otherUser);
-      socket.to(otherUser).emit('user-joined', socket.id);
+  socket.on('reject-call', (payload) => {
+    const targetSocket = users[payload.targetCode];
+    if (targetSocket) {
+      io.to(targetSocket).emit('call-rejected');
     }
   });
 
   socket.on('offer', (payload) => {
-    io.to(payload.target).emit('offer', payload);
+    const targetSocket = users[payload.target];
+    if (targetSocket) io.to(targetSocket).emit('offer', payload);
   });
 
   socket.on('answer', (payload) => {
-    io.to(payload.target).emit('answer', payload);
+    const targetSocket = users[payload.target];
+    if (targetSocket) io.to(targetSocket).emit('answer', payload);
   });
 
   socket.on('ice-candidate', (payload) => {
-    io.to(payload.target).emit('ice-candidate', payload);
+    const targetSocket = users[payload.target];
+    if (targetSocket) io.to(targetSocket).emit('ice-candidate', payload);
+  });
+
+  socket.on('end-call', (payload) => {
+    const targetSocket = users[payload.targetCode];
+    if (targetSocket) io.to(targetSocket).emit('call-ended');
   });
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    for (const roomId in rooms) {
-      const index = rooms[roomId].indexOf(socket.id);
-      if (index !== -1) {
-        rooms[roomId].splice(index, 1);
-        socket.to(roomId).emit('user-left', socket.id);
-        if (rooms[roomId].length === 0) {
-          delete rooms[roomId];
-        }
-        break;
-      }
+    if (socket.uniqueCode) {
+      delete users[socket.uniqueCode];
     }
   });
 });
